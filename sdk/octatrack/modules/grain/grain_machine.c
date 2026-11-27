@@ -469,7 +469,11 @@ static uint32_t grain_page(const volatile uint8_t *slot)
  * Part lo que devuelve (ev_knob_store, 0x40055170; octabam lo usa para el cuantizador de PTCH). La parte entera es el
  * octeto de POS de siempre; los octavos (0..7) van en SETUP F (Part + 0x1e0 + 30 t + 5), oculto, cuyo rango de FLEX
  * (TSNS, 0..127) pasa el validador de stock. Despacio (un detent) avanza un octavo; deprisa, numeros enteros.
- * Girando con un trig pulsado (p-lock) no pasa por aqui: el p-lock es entero. */
+ * Girando con un trig pulsado o grabando en vivo (p-lock) tambien pasa por aqui, y lo que devuelve es el bloqueo: ahi un
+ * detent es una unidad entera y no se toca la Part (0.2.0 y anteriores escribian los octavos en la Part y el bloqueo solo
+ * avanzaba cada 8 detents lentos). */
+#define HELD_TRIGS U16(0x460d174au)   /* un bit por trig pulsado en grabacion de rejilla (octabam STEP_LOCKS.md) */
+#define LIVE_REC U32(0x460d172au)     /* distinto de 0 grabando en vivo */
 static int bank_ok(void);
 static volatile uint8_t *part_at(unsigned i);
 static int ours(const volatile uint8_t *p, unsigned t);
@@ -479,6 +483,10 @@ static int pos_step(int slot, int detents, int value)
     volatile uint8_t *part = part_at(pi);
     /* POS (slot 1): octavos en SETUP F (indice 5); SIZE (slot 2): en SETUP E (indice 4), tambien oculto (author, 19/11) */
     if (slot != 1 || !bank_ok() || !ours(part, t)) return value + detents;
+    if (HELD_TRIGS || LIVE_REC) {           /* p-lock: un entero por detent (7 con el mando pulsado), la Part intacta */
+        int v = value + detents * (U32(0x46c7d8eeu + 24u * (unsigned)(slot + 56)) ? 7 : 1);
+        return v < 0 ? 0 : v > 127 ? 127 : v;
+    }
     unsigned ix = slot == 1 ? 5u : 4u, at = 0x1e0u + 30u * t + ix;
     int e = value * 8 + (part[at] & 7);
     /* con el mando pulsado, como el paso de serie (0x4003240c): cada detent vale 7 numeros enteros; el estado de la tecla
@@ -855,6 +863,39 @@ static unsigned part_size(volatile uint8_t *part, unsigned t)
     return w > 0x7fffu ? 0x7fffu : w;
 }
 
+/* El paso del trig pulsado en grabacion de rejilla (el mas alto si hay varios), o -1. 0x460d174c: el primer paso de la
+ * pagina de pasos a la vista. */
+static int held_step(void)
+{
+    unsigned mask = HELD_TRIGS, bit = 15;
+    if (!mask) return -1;
+    while (!(mask >> bit & 1u)) --bit;
+    uint32_t first = U32(0x460d174cu);
+    if (first > 48u) first = U16(0x460d174cu);
+    return first > 48u ? -1 : (int)(first + bit);
+}
+/* El valor que ensena la pantalla para el mando k (0..5, pagina PLAYBACK): con un trig pulsado, su p-lock si lo tiene
+ * (patron + t * 0x91a + 0x59 + paso * 32 + k; 0xff = sin bloqueo); si no, el de la Part. */
+static uint8_t shown_value(unsigned t, volatile uint8_t *part, unsigned k)
+{
+    int step = held_step();
+    if (step >= 0 && bank_ok()) {
+        uint8_t v = U8(U32(BANK) + (U8(0x80000004u) & 15u) * 0x8ed8u + t * 0x91au + 0x59u + (unsigned)step * 32u + k);
+        if (v != 0xffu) return v;
+    }
+    return part[0x30u + 30u * t + k];
+}
+/* POS en 1/256: con un trig pulsado, su bloqueo (o la Part); sonando, lo que suena; parado, la Part. */
+static unsigned shown_pos(unsigned t, volatile uint8_t *part)
+{
+    if (held_step() >= 0) {
+        uint8_t v = shown_value(t, part, 1);
+        unsigned w = v == part[0x30u + 30u * t + 1] ? part_pos(part, t) : (unsigned)v << 8;
+        return w > 0x7fffu ? 0x7fffu : w;
+    }
+    return live_at[t] + 8u > live_tick ? live_w[t].w[1] : part_pos(part, t);
+}
+
 /* La onda del sample de la pista con la linea de POS y los granos vivos, en las columnas x0..x1 y las filas top..bot:
  * la misma en la pagina SRC y en la pantalla completa. Azul sobre blanco, una centrada (mono) o L arriba y R abajo
  * (estereo). */
@@ -883,7 +924,7 @@ static void wave_area(unsigned t, volatile uint8_t *part, int x0, int x1, int to
     }
     /* POS: linea de puntos y triangulito, FIJA donde esta POS; con SCAN son los granos los que corren (author, 18/11).
      * POS de lo que suena (con escenas y LFOs) mientras suena; si no, el de la Part; misma cuenta que el motor */
-    uint32_t step = s->count / (uint32_t)width + 1u, pw = live ? live_w[t].w[1] : part_pos(part, t);
+    uint32_t step = s->count / (uint32_t)width + 1u, pw = shown_pos(t, part);
     uint32_t at = gran_position(s->count, pw > 0x7fffu ? 0x7fffu : pw);
     int px = x0 + (int)(at / step);
     for (int y = top + 3; y <= bot; y += 2)          /* en inverso: se ve tambien encima de la onda */
@@ -904,9 +945,9 @@ static void wave_area(unsigned t, volatile uint8_t *part, int x0, int x1, int to
 /* El valor de un mando para la pantalla: POS con sus octavos (lo que suena, si suena), el resto con value_text */
 static void knob_value(char *buf, unsigned t, volatile uint8_t *part, unsigned k)
 {
-    if (k == 1) pos_text(buf, live_at[t] + 8u > live_tick ? live_w[t].w[1] : part_pos(part, t));
-    else if (k == 2) number(buf, part[0x30u + 30u * t + 2]);   /* SIZE 0..127, entera como la lee el motor (author, 19/11) */
-    else value_text(buf, k, part[0x30u + 30u * t + k]);
+    if (k == 1) pos_text(buf, shown_pos(t, part));
+    else if (k == 2) number(buf, shown_value(t, part, 2));   /* SIZE 0..127, entera como la lee el motor (author, 19/11) */
+    else value_text(buf, k, shown_value(t, part, k));
 }
 
 /* ---- la pantalla completa (maqueta A, elegida el 19/11) ----
@@ -1029,11 +1070,15 @@ void grain_draw(unsigned char *frame)
     if (!U32(POOL_WINDOW)) pool_direct = 0;                                 /* la pagina SRC a la vista: el pool, cerrado */
     /* valores de los mandos (los de la Part): el que cambia se muestra un segundo */
     static uint8_t known[8];   /* la primera lectura de una pista no cuenta como giro (salia «0.00» al entrar) */
+    static int last_step = -1;
+    int step_now = held_step(), same_step = step_now == last_step;   /* pulsar o soltar un trig no es girar un mando */
+    last_step = step_now;
+    if (!same_step) show_until = 0;
     for (unsigned k = 0; k < 6; ++k) {
-        uint8_t v = part[0x30u + 30u * t + k];
+        uint8_t v = shown_value(t, part, k);
         if (v != last_val[t][k]) {
             last_val[t][k] = v;
-            if (known[t]) { show_k = (uint8_t)k; show_t = (uint8_t)t; show_until = draws + 60u; }
+            if (known[t] && same_step) { show_k = (uint8_t)k; show_t = (uint8_t)t; show_until = draws + 60u; }
         }
     }
     {   /* un octavo de POS tambien es un giro de POS */
