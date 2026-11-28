@@ -811,3 +811,28 @@ back to SRC. Pressing PLAYBACK again closes it. FUNC + PLAYBACK still opens SRC 
 | An MKII unit | the keymap and the panel differ between the models | Not run | not run: no MKII at hand; the emulator was used in MKII mode, which is not hardware evidence |
 
 An emulator result never counts as hardware evidence; every row says which it is.
+
+## Unreleased: POS p-locks and recording a Grain track (28 November 2026)
+
+Not packaged in this branch and not released. Base 0.8.2, the author's MKI.
+
+**POS p-locks.** With a trig held in grid recording, or in live recording, POS moves one unit per detent (seven with the
+knob pushed), the Part is left alone and the page shows the locked value. Before, the fine step also ran there: the lock
+moved only every eight slow detents and the eighths were written to the Part. Emulator: pass, also on step 18. On the unit
+the author reported it works.
+
+**Recording a Grain track into a Flex recorder (repeat98/modwerk#2186).** Reproduced: Grain on T4 (DENS 127), time-stretched
+loops on T2 and T3, T1 recording T4. The base's frame guard skipped about 600 Grain renders a second while recording; none
+or a few without recording, and none with a time-stretched Flex track in Grain's place.
+
+Change: while Grain renders its own voice, the stock FLEX reader's PCM copy (`jsr 0x40007960` at `0x400041c4`) is skipped,
+since Grain replaced all of it. The rest of the reader runs as before; `gran.c` is unchanged.
+
+On the unit, with an on-screen DTCN3 meter (not in this branch), while recording, per render call: stock FLEX part 9.9 to
+1.6 us, grain mix 14.6 to 14.7 us, total 31.3 to 22.6 us (about 17.2 % to 12.5 % of a frame). Without recording the total was
+38.4 us before; it was not measured after. Skips fell to 161 in about seven minutes; the author heard at most an isolated one.
+Emulator: audio matches the previous build within the run-to-run variation (not bit-exact).
+
+Open before a release: POLY8 detours the same site, so the two cannot be installed together (a base event would solve it);
+the frame-cost curve has not been re-measured with `device:price` and the declared price is unchanged; `verify.py` passed
+for the p-lock change and was not re-run for the second one (the engine file is unchanged).
