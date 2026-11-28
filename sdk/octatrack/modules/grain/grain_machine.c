@@ -382,6 +382,17 @@ int grain_start(unsigned track, unsigned sample, unsigned flags)
     return result;
 }
 
+/* La copia del PCM del lector FLEX (0x400041c4: jsr 0x40007960 y su limpieza de pila, 8 octetos). Grain la sobrescribe entera,
+ * asi que durante su propio render FLEX no se hace: el resto del lector (posicion, bucle, cabecera del paquete) corre igual.
+ * Argumentos en la pila: destino, ping, pista, fuentes, frames, bandera. El mismo punto que envuelve POLY8 (Jannik, MIT):
+ * los dos modulos no pueden instalarse juntos mientras la base no tenga un evento para el. */
+volatile uint8_t grain_skip[8];
+__asm__(".text\n\t.even\n\t.globl grain_copy\ngrain_copy:\n\t"
+        "move.l 8(%sp),%d0\n\tmoveq #7,%d1\n\tcmp.l %d1,%d0\n\tbhi.s 1f\n\t"
+        "lea grain_skip,%a0\n\ttst.b (0,%a0,%d0.l)\n\tbne.s 2f\n"
+        "1:\tjsr 0x40007960\n"
+        "2:\tlea 24(%sp),%sp\n\tjmp 0x400041cc\n");
+
 /* La interrupcion de frame, dos veces por frame por pista nuestra: hasta 16 frames de salida por llamada. */
 int grain_render(unsigned track, unsigned ping, unsigned start, unsigned end)
 {
@@ -396,7 +407,10 @@ int grain_render(unsigned track, unsigned ping, unsigned start, unsigned end)
         return plain;
     }
     view_open(fp, &v);
+    unsigned filled = 0;
+    grain_skip[track & 7u] = 1;
     int result = FLEX_RENDER(track, ping, start, end);
+    grain_skip[track & 7u] = 0;
     if (U8(voice)) {
         int32_t *pcm = 0;
         unsigned sources = packet(fp, before, &pcm);
@@ -407,7 +421,13 @@ int grain_render(unsigned track, unsigned ping, unsigned start, unsigned end)
                 gran_render(&eng, track, &c->params, sample, c->whole, c->frac, pcm, sources);
             } else
                 for (unsigned i = 0; i < 2u * sources; ++i) pcm[i] = 0;   /* sample ilegible: silencio */
+            filled = 1;
         }
+    }
+    if (!filled) {   /* nadie ha escrito el PCM (voz recien terminada, paquete raro): silencio, nunca restos del buffer */
+        uint32_t made = U32(CURSOR) - before, n = made >= 16u ? U32(before) & 255u : 0u;
+        if (made >= 16u + 8u * n && made <= 336u)
+            for (unsigned i = 0; i < 2u * n; ++i) ((int32_t *)(before + 16u))[i] = 0;
     }
     view_close(fp, &v);
     return result;

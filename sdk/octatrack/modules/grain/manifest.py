@@ -12,7 +12,8 @@ No stock code is patched: the machine joins the base's machine list and START di
 power-on check. The connection to stock follows AMIGA (Jannik Assfalg, MIT).
 """
 
-from remix.schema import Category, Gate, Kind, Linked, Module, Proof
+from remix.schema import Category, Detour, Gate, Kind, Linked, Module, Proof
+from remix.stock_guard import stock_guard
 
 MODULE = Module(
     name="grain",
@@ -26,6 +27,10 @@ MODULE = Module(
     doc="Track machine: six-grain granular on the Flex sample, with a waveform view and a full-screen page.",
     linked=(
         Linked("grain", "modules/grain/grain_core.s", cpu="5475", dram=True),
+    ),
+    detours=(
+        Detour(0x400041C4, stock_guard(0x400041C4, 8, "935fcfbfbcb323efa9fe7bada6974a125a8ea86989b79c535d556fc72d4d138d"),
+               "grain", "grain_copy", "Skip the FLEX reader's PCM copy while Grain renders its own", pad_to=8),
     ),
     gates=(Gate("modules/grain/test_grain.py", remix_arg=False),),
 )
